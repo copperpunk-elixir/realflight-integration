@@ -346,16 +346,15 @@ defmodule RealflightIntegration do
       aircraft_state = Utils.extract_from_path(return_data, aircraft_state_path())
       rcin_values = Utils.extract_from_path(return_data, rcin_path())
       position = Utils.extract_position(aircraft_state, state.position_origin_rrm)
-      # Logger.debug("position: #{Common.Utils.LatLonAlt.to_string(position)}")
+      # Logger.debug("position: #{ViaUtils.Location.to_string(position)}")
       velocity = Utils.extract_velocity(aircraft_state)
       # Logger.debug("velocity: #{ViaUtils.Format.eftb_map(velocity, 2)}")
       attitude = Utils.extract_attitude(aircraft_state)
-      # Logger.debug("attitude: #{inspect(Common.Utils.map_rad2deg(attitude))}")
+      # Logger.debug("attitude: #{ViaUtils.Format.eftb_map_deg(attitude, 1)}")
       bodyaccel = Utils.extract_bodyaccel(aircraft_state)
       # Logger.debug("bodyaccel: #{ViaUtils.Format.eftb_map(bodyaccel, 3)}")
       bodyrate = Utils.extract_bodyrate(aircraft_state)
-      # Logger.debug(Common.Utils.eftb_map_deg(bodyrate, 2))
-      # Logger.debug("bodyrate: #{inspect(Common.Utils.map_rad2deg(bodyrate))}")
+      # Logger.debug(ViaUtils.Format.eftb_map_deg(bodyrate, 2))
       agl = Utils.extract_agl(aircraft_state)
       # Logger.debug("agl: #{agl}")
       airspeed = Utils.extract_airspeed(aircraft_state)
@@ -364,7 +363,7 @@ defmodule RealflightIntegration do
       servo_out = if state.rc_passthrough, do: rcin, else: state.servo_out
       # Logger.debug("rcin: #{inspect(rcin)}")
       # end_time = :os.system_time(:microsecond)
-      # Logger.debug("dt: #{Common.Utils.eftb((end_time-start_time)*0.001,1)}")
+      # Logger.debug("dt: #{ViaUtils.Format.eftb((end_time-start_time)*0.001,1)}")
       %{
         state
         | bodyaccel_mpss: bodyaccel,
