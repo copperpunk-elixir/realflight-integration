@@ -1,11 +1,18 @@
 defmodule RealflightIntegration.MixProject do
   use Mix.Project
 
+  @version "0.1.0"
+  @source_url "https://github.com/copperpunk-elixir/realflight-integration"
+
   def project do
     [
       app: :realflight_integration,
-      version: "0.1.0",
+      version: @version,
       elixir: "~> 1.12",
+      description: description(),
+      package: package(),
+      source_url: @source_url,
+      docs: docs(),
       start_permanent: Mix.env() == :prod,
       deps: deps()
     ]
@@ -18,9 +25,30 @@ defmodule RealflightIntegration.MixProject do
     ]
   end
 
+  defp description do
+    "GenServer to integrate with RealFlight simulator. Build to assist the Via autopilot."
+  end
+
+  defp package do
+    %{
+      licenses: ["GPL-3.0"],
+      links: %{"Github" => @source_url}
+    }
+  end
+
+  defp docs do
+    [
+      extras: ["README.md"],
+      main: "readme",
+      source_ref: "v#{@version}",
+      source_url: @source_url
+    ]
+  end
+
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
+      {:ex_doc, "~> 0.24", only: :dev, runtime: false},
       {:via_utils, "~> 0.1.4"},
       {:soap, "~> 1.0.1"},
       {:httpoison, "~> 1.8.0"},
