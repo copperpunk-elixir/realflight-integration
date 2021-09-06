@@ -7,6 +7,7 @@ defmodule RealflightIntegration do
   require Logger
   use Bitwise
   use GenServer
+  require ViaUtils.Comms.Groups, as: Groups
 
   # @rad2deg 57.295779513
   @default_latitude 41.769201
@@ -20,7 +21,7 @@ defmodule RealflightIntegration do
   @gps_relhdg_loop :gps_relhdg_loop
   @airspeed_loop :airspeed_loop
   @down_tof_loop :down_tof_loop
-  @software_update_actuators :software_update_actuators
+  @simulation_update_actuators :simulation_update_actuators
 
   def start_link(config) do
     Logger.debug("Start RealflightIntegration GenServer")
@@ -30,7 +31,7 @@ defmodule RealflightIntegration do
   @impl GenServer
   def init(config) do
     ViaUtils.Comms.start_operator(__MODULE__)
-    ViaUtils.Comms.join_group(__MODULE__, @software_update_actuators, self())
+    ViaUtils.Comms.join_group(__MODULE__, @simulation_update_actuators, self())
 
     url = Keyword.fetch!(config, :host_ip) <> ":18083"
     Logger.debug("url: #{url}")
@@ -127,33 +128,20 @@ defmodule RealflightIntegration do
     {:noreply, state}
   end
 
-  # @impl GenServer
-  # def handle_cast({:update_actuators, output_map}, state) do
-  #   servo_out =
-  #     if Enum.empty?(output_map) do
-  #       state.servo_out
-  #     else
-  #       output_map =
-  #         Enum.reduce(output_map, %{}, fn {actuator_name, {actuator, output}}, acc ->
-  #           if actuator.reversed do
-  #             Map.put(acc, actuator_name, 1.0 - output)
-  #           else
-  #             Map.put(acc, actuator_name, output)
-  #           end
-  #         end)
+  @impl GenServer
+  def handle_cast({@simulation_update_actuators, actuators_and_outputs, is_override}, state) do
+    # Logger.debug("output map: #{ViaUtils.Format.eftb_map(actuators_and_outputs,3)}")
+    aileron = Map.get(actuators_and_outputs, :aileron_scaled) |> get_one_sided_value()
+    elevator = Map.get(actuators_and_outputs, :elevator_scaled) |> get_one_sided_value()
+    elevator = if is_override, do: elevator, else: 1-elevator
+    throttle = Map.get(actuators_and_outputs, :throttle_scaled)# |> get_one_sided_value()
+    rudder = Map.get(actuators_and_outputs, :rudder_scaled) |> get_one_sided_value()
+    flaps = Map.get(actuators_and_outputs, :flaps_scaled) #|> get_one_sided_value()
+    servo_out = [aileron, elevator, throttle, rudder, 0, flaps, 0, 0, 0, 0, 0, 0]
 
-  #       # Logger.debug("output map: #{inspect(output_map)}")
-  #       aileron = Map.get(output_map, :aileron, 0.5)
-  #       elevator = Map.get(output_map, :elevator, 0.5)
-  #       throttle = Map.get(output_map, :throttle, 0.0)
-  #       rudder = Map.get(output_map, :rudder, 0.5)
-  #       flaps = Map.get(output_map, :flaps, 0.0)
-  #       [aileron, 1 - elevator, throttle, rudder, 0, flaps, 0, 0, 0, 0, 0, 0]
-  #     end
-
-  #   # Logger.debug("servo_out: #{inspect(servo_out)}")
-  #   {:noreply, %{state | servo_out: servo_out}}
-  # end
+    # Logger.debug("servo_out: #{inspect(servo_out)}")
+    {:noreply, %{state | servo_out: servo_out}}
+  end
 
   # @impl GenServer
   # def handle_cast({:pwm_input, scaled_values}, state) do
@@ -179,7 +167,18 @@ defmodule RealflightIntegration do
 
   def handle_info(@exchange_data_loop, state) do
     state = exchange_data(state, state.servo_out)
-    # state = exchange_data(state, state.rcin)
+
+    rcin =
+      Enum.map(state.rcin, fn x ->
+        get_two_sided_value(x)
+      end)
+
+    ViaUtils.Comms.send_global_msg_to_group(
+      __MODULE__,
+      {Groups.command_channels(), rcin},
+      self()
+    )
+
     {:noreply, state}
   end
 
@@ -430,5 +429,15 @@ defmodule RealflightIntegration do
   @spec rcin_path() :: list()
   def rcin_path() do
     ["m-previousInputsState", "m-channelValues-0to1", "item"]
+  end
+
+  @spec get_one_sided_value(number()) :: number()
+  def get_one_sided_value(two_sided_value) do
+    0.5 * two_sided_value + 0.5
+  end
+
+  @spec get_two_sided_value(number()) :: number()
+  def get_two_sided_value(one_sided_value) do
+    2 * one_sided_value - 1
   end
 end
