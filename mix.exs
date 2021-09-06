@@ -48,8 +48,8 @@ defmodule RealflightIntegration.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:ex_doc, "~> 0.24", only: :dev, runtime: false},
-      {:via_utils, "~> 0.1.4"},
+      {:ex_doc, "~> 0.24", only: :dev, runtime: false},      
+      {:via_utils,git: "https://github.com/copperpunk-elixir/via-utils.git", tag: "v0.1.4-alpha"},
       {:soap, "~> 1.0.1"},
       {:httpoison, "~> 1.8.0"},
       {:sax_map, "~> 1.0"}
