@@ -33,7 +33,13 @@ defmodule RealflightIntegration do
     ViaUtils.Comms.start_operator(__MODULE__)
     ViaUtils.Comms.join_group(__MODULE__, @simulation_update_actuators, self())
 
-    url = Keyword.fetch!(config, :host_ip) <> ":18083"
+    ip_address = Keyword.get(config, :host_ip)
+    url =
+      case ip_address do
+        nil -> nil
+        ip -> ip <> ":18083"
+      end
+
     Logger.debug("url: #{url}")
 
     publish_dt_accel_gyro_interval_ms = config[:publish_dt_accel_gyro_interval_ms]
@@ -67,12 +73,9 @@ defmodule RealflightIntegration do
       publish_gps_position_velocity_interval_ms: publish_gps_position_velocity_interval_ms,
       publish_gps_relative_heading_interval_ms: publish_gps_relative_heading_interval_ms,
       publish_airspeed_interval_ms: publish_airspeed_interval_ms,
-      publish_downward_tof_distance_interval_ms: publish_downward_tof_distance_interval_ms
+      publish_downward_tof_distance_interval_ms: publish_downward_tof_distance_interval_ms,
+      exchange_data_loop_interval_ms: config[:sim_loop_interval_ms]
     }
-
-    restore_controller(url)
-
-    inject_controller_interface(url)
 
     ViaUtils.Process.start_loop(
       self(),
@@ -92,8 +95,13 @@ defmodule RealflightIntegration do
       @gps_relhdg_loop
     )
 
-    ViaUtils.Process.start_loop(self(), publish_downward_tof_distance_interval_ms, @down_tof_loop)
-    ViaUtils.Process.start_loop(self(), config[:sim_loop_interval_ms], @exchange_data_loop)
+    if is_nil(ip_address) do
+      ViaUtils.Comms.join_group(__MODULE__, :set_realflight_ip_address)
+      ViaUtils.Comms.join_group(__MODULE__, :host_ip_address_updated)
+    else
+      start_realflight_loops(ip_address, state)
+    end
+
     {:ok, state}
   end
 
@@ -101,6 +109,53 @@ defmodule RealflightIntegration do
   def terminate(reason, state) do
     Logger.error("#{__MODULE__} terminated for #{inspect(reason)}")
     state
+  end
+
+  def start_realflight_loops(ip_address, state) do
+    url = get_url_for_ip(ip_address)
+    restore_controller(url)
+    inject_controller_interface(url)
+
+    Logger.info("RFI start loops: #{url}")
+    ViaUtils.Comms.send_local_msg_to_group(
+      __MODULE__,
+      {:realflight_ip_address_updated, ip_address},
+      self()
+    )
+
+    ViaUtils.Process.start_loop(
+      self(),
+      state.publish_downward_tof_distance_interval_ms,
+      @down_tof_loop
+    )
+
+    ViaUtils.Process.start_loop(self(), state.exchange_data_loop_interval_ms, @exchange_data_loop)
+  end
+
+  def get_url_for_ip(ip_address) do
+    ip_address <> ":18083"
+  end
+
+  @impl GenServer
+  def handle_cast({:set_realflight_ip_address, ip_address}, state) do
+    Logger.debug("received RF IP: #{ip_address}")
+    start_realflight_loops(ip_address, state)
+
+    url = get_url_for_ip(ip_address)
+    {:noreply, %{state | url: url}}
+  end
+
+  @impl GenServer
+  def handle_cast({:host_ip_address_updated, ip_address}, state) do
+    Logger.debug("RFI Host IP updated: #{ip_address}")
+    ip_list = String.split(ip_address, ".")
+    last_byte = ip_list |> Enum.at(3) |> String.to_integer()
+    last_byte = if last_byte == 255, do: 100, else: last_byte + 1
+    ip_address = List.replace_at(ip_list, 3, Integer.to_string(last_byte)) |> Enum.join(".")
+
+    start_realflight_loops(ip_address, state)
+    url = get_url_for_ip(ip_address)
+    {:noreply, %{state | url: url}}
   end
 
   @impl GenServer
@@ -133,10 +188,12 @@ defmodule RealflightIntegration do
     # Logger.debug("output map: #{ViaUtils.Format.eftb_map(actuators_and_outputs,3)}")
     aileron = Map.get(actuators_and_outputs, :aileron_scaled) |> get_one_sided_value()
     elevator = Map.get(actuators_and_outputs, :elevator_scaled) |> get_one_sided_value()
-    elevator = if is_override, do: elevator, else: 1-elevator
-    throttle = Map.get(actuators_and_outputs, :throttle_scaled)# |> get_one_sided_value()
+    elevator = if is_override, do: elevator, else: 1 - elevator
+    # |> get_one_sided_value()
+    throttle = Map.get(actuators_and_outputs, :throttle_scaled)
     rudder = Map.get(actuators_and_outputs, :rudder_scaled) |> get_one_sided_value()
-    flaps = Map.get(actuators_and_outputs, :flaps_scaled) #|> get_one_sided_value()
+    # |> get_one_sided_value()
+    flaps = Map.get(actuators_and_outputs, :flaps_scaled)
     servo_out = [aileron, elevator, throttle, rudder, 0, flaps, 0, 0, 0, 0, 0, 0]
 
     # Logger.debug("servo_out: #{inspect(servo_out)}")
