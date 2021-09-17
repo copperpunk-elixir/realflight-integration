@@ -8,6 +8,7 @@ defmodule RealflightIntegration do
   use Bitwise
   use GenServer
   require ViaUtils.Comms.Groups, as: Groups
+  alias ViaUtils.Watchdog
 
   # @rad2deg 57.295779513
   @default_latitude 41.769201
@@ -22,7 +23,9 @@ defmodule RealflightIntegration do
   @airspeed_loop :airspeed_loop
   @down_tof_loop :down_tof_loop
   @simulation_update_actuators :simulation_update_actuators
+  @clear_exchange_callback :clear_exchange_callback
 
+  @ip_filename "realflight.txt"
   def start_link(config) do
     Logger.debug("Start RealflightIntegration GenServer")
     ViaUtils.Process.start_link_redundant(GenServer, __MODULE__, config, __MODULE__)
@@ -34,6 +37,7 @@ defmodule RealflightIntegration do
     ViaUtils.Comms.join_group(__MODULE__, @simulation_update_actuators, self())
 
     ip_address = Keyword.get(config, :host_ip)
+
     url =
       case ip_address do
         nil -> nil
@@ -49,6 +53,7 @@ defmodule RealflightIntegration do
     publish_downward_tof_distance_interval_ms = config[:publish_downward_tof_distance_interval_ms]
 
     state = %{
+      ip_address: ip_address,
       url: url,
       bodyaccel_mpss: %{},
       attitude_rad: %{},
@@ -74,7 +79,9 @@ defmodule RealflightIntegration do
       publish_gps_relative_heading_interval_ms: publish_gps_relative_heading_interval_ms,
       publish_airspeed_interval_ms: publish_airspeed_interval_ms,
       publish_downward_tof_distance_interval_ms: publish_downward_tof_distance_interval_ms,
-      exchange_data_loop_interval_ms: config[:sim_loop_interval_ms]
+      exchange_data_loop_interval_ms: config[:sim_loop_interval_ms],
+      exchange_data_watchdog: Watchdog.new(@clear_exchange_callback, 10000),
+      exchange_data_timer: nil
     }
 
     ViaUtils.Process.start_loop(
@@ -95,12 +102,32 @@ defmodule RealflightIntegration do
       @gps_relhdg_loop
     )
 
-    if is_nil(ip_address) do
-      ViaUtils.Comms.join_group(__MODULE__, :set_realflight_ip_address)
-      ViaUtils.Comms.join_group(__MODULE__, :host_ip_address_updated)
-    else
-      start_realflight_loops(ip_address, state)
-    end
+    ViaUtils.Process.start_loop(
+      self(),
+      state.publish_downward_tof_distance_interval_ms,
+      @down_tof_loop
+    )
+
+    ViaUtils.Comms.join_group(__MODULE__, :set_realflight_ip_address)
+    ViaUtils.Comms.join_group(__MODULE__, :get_realflight_ip_address)
+
+    state =
+      if is_nil(ip_address) do
+        # ViaUtils.Comms.join_group(__MODULE__, :host_ip_address_updated)
+        check_for_rf_ip_address()
+        state
+      else
+        reset_realflight_interface(ip_address)
+
+        exchange_data_timer =
+          ViaUtils.Process.start_loop(
+            self(),
+            state.exchange_data_loop_interval_ms,
+            @exchange_data_loop
+          )
+
+        %{state | exchange_data_timer: exchange_data_timer}
+      end
 
     {:ok, state}
   end
@@ -111,51 +138,92 @@ defmodule RealflightIntegration do
     state
   end
 
-  def start_realflight_loops(ip_address, state) do
+  def reset_realflight_interface(ip_address) do
     url = get_url_for_ip(ip_address)
     restore_controller(url)
     inject_controller_interface(url)
 
     Logger.info("RFI start loops: #{url}")
+
     ViaUtils.Comms.send_local_msg_to_group(
       __MODULE__,
       {:realflight_ip_address_updated, ip_address},
       self()
     )
-
-    ViaUtils.Process.start_loop(
-      self(),
-      state.publish_downward_tof_distance_interval_ms,
-      @down_tof_loop
-    )
-
-    ViaUtils.Process.start_loop(self(), state.exchange_data_loop_interval_ms, @exchange_data_loop)
   end
 
   def get_url_for_ip(ip_address) do
     ip_address <> ":18083"
   end
 
-  @impl GenServer
-  def handle_cast({:set_realflight_ip_address, ip_address}, state) do
-    Logger.debug("received RF IP: #{ip_address}")
-    start_realflight_loops(ip_address, state)
+  def check_for_rf_ip_address() do
+    realflight_ip_binary = ViaUtils.File.read_file(@ip_filename, "/data/")
 
-    url = get_url_for_ip(ip_address)
-    {:noreply, %{state | url: url}}
+    if !is_nil(realflight_ip_binary) do
+      extract_and_send_ip(realflight_ip_binary)
+    else
+      Logger.debug("No Realflight IP found in data. Check USB.")
+      realflight_ip_binary = ViaUtils.File.read_file(@ip_filename)
+
+      if !is_nil(realflight_ip_binary) do
+        ip = extract_and_send_ip(realflight_ip_binary)
+        ViaUtils.File.write_file(@ip_filename, "/data/", ip)
+      else
+        Logger.debug("No Realflight IP found in USB..")
+        nil
+      end
+    end
+  end
+
+  def extract_and_send_ip(ip_binary) do
+    ip = ip_binary |> String.trim_trailing("\n")
+
+    Logger.debug("Realflight IP found in data: #{inspect(ip)}")
+    GenServer.cast(__MODULE__, {:set_realflight_ip_address, ip})
+    ip
   end
 
   @impl GenServer
-  def handle_cast({:host_ip_address_updated, ip_address}, state) do
-    Logger.debug("RFI Host IP updated: #{ip_address}")
-    ip_list = String.split(ip_address, ".")
-    last_byte = ip_list |> Enum.at(3) |> String.to_integer()
-    last_byte = if last_byte == 255, do: 100, else: last_byte + 1
-    ip_address = List.replace_at(ip_list, 3, Integer.to_string(last_byte)) |> Enum.join(".")
+  def handle_cast(:get_realflight_ip_address, state) do
+    Logger.debug("RF rx get_rf_ip: #{state.ip_address}")
 
-    start_realflight_loops(ip_address, state)
+    ViaUtils.Comms.send_local_msg_to_group(
+      __MODULE__,
+      {:realflight_ip_address_updated, state.ip_address},
+      self()
+    )
+
+    {:noreply, state}
+  end
+
+  @impl GenServer
+  def handle_cast({:set_realflight_ip_address, ip_address}, state) do
+    Logger.debug("received RF IP: #{ip_address}")
+    reset_realflight_interface(ip_address)
+
+    ViaUtils.File.write_file(@ip_filename, "/data/", ip_address)
+
+    ViaUtils.Comms.send_local_msg_to_group(
+      __MODULE__,
+      {:realflight_ip_address_updated, ip_address},
+      self()
+    )
+
+    exchange_data_timer =
+      if is_nil(state.exchange_data_timer) do
+        ViaUtils.Process.start_loop(
+          self(),
+          state.exchange_data_loop_interval_ms,
+          @exchange_data_loop
+        )
+      else
+        state.exchange_data_timer
+      end
+
     url = get_url_for_ip(ip_address)
-    {:noreply, %{state | url: url}}
+
+    {:noreply,
+     %{state | url: url, ip_address: ip_address, exchange_data_timer: exchange_data_timer}}
   end
 
   @impl GenServer
@@ -186,14 +254,62 @@ defmodule RealflightIntegration do
   @impl GenServer
   def handle_cast({@simulation_update_actuators, actuators_and_outputs, is_override}, state) do
     # Logger.debug("output map: #{ViaUtils.Format.eftb_map(actuators_and_outputs,3)}")
-    aileron = Map.get(actuators_and_outputs, :aileron_scaled) |> get_one_sided_value()
-    elevator = Map.get(actuators_and_outputs, :elevator_scaled) |> get_one_sided_value()
+    [aileron_prev, elevator_prev, throttle_prev, rudder_prev, _, flaps_prev, _, _, _, _, _, _] =
+      state.servo_out
+
+    aileron =
+      case Map.get(actuators_and_outputs, :aileron_scaled) do
+        nil ->
+          Logger.error("RFI aileron is nil")
+          aileron_prev
+
+        aileron_two_sided ->
+          get_one_sided_value(aileron_two_sided)
+      end
+
+    elevator =
+      case Map.get(actuators_and_outputs, :elevator_scaled) do
+        nil ->
+          Logger.error("RFI elevator is nil")
+          elevator_prev
+
+        elevator_two_sided ->
+          get_one_sided_value(elevator_two_sided)
+      end
+
     elevator = if is_override, do: elevator, else: 1 - elevator
     # |> get_one_sided_value()
-    throttle = Map.get(actuators_and_outputs, :throttle_scaled)
-    rudder = Map.get(actuators_and_outputs, :rudder_scaled) |> get_one_sided_value()
+    throttle =
+      case Map.get(actuators_and_outputs, :throttle_scaled) do
+        nil ->
+          Logger.error("RFI throttle is nil")
+          throttle_prev
+
+        throttle ->
+          throttle
+      end
+
+    rudder =
+      case Map.get(actuators_and_outputs, :rudder_scaled) do
+        nil ->
+          Logger.error("RFI rudder is nil")
+          rudder_prev
+
+        rudder_two_sided ->
+          get_one_sided_value(rudder_two_sided)
+      end
+
     # |> get_one_sided_value()
-    flaps = Map.get(actuators_and_outputs, :flaps_scaled)
+    flaps =
+      case Map.get(actuators_and_outputs, :flaps_scaled) do
+        nil ->
+          Logger.error("RFI flaps is nil")
+          flaps_prev
+
+        flaps ->
+          flaps
+      end
+
     servo_out = [aileron, elevator, throttle, rudder, 0, flaps, 0, 0, 0, 0, 0, 0]
 
     # Logger.debug("servo_out: #{inspect(servo_out)}")
@@ -319,6 +435,16 @@ defmodule RealflightIntegration do
     {:noreply, state}
   end
 
+  @impl GenServer
+  def handle_info(@clear_exchange_callback, state) do
+    Logger.warn("#{inspect(__MODULE__)} clear is_exchange_current}")
+    url = state.url
+    restore_controller(url)
+    inject_controller_interface(url)
+
+    {:noreply, %{state | exchange_data_watchdog: Watchdog.reset(state.exchange_data_watchdog)}}
+  end
+
   def fix_rx(x) do
     (x - 0.5) * @rf_stick_mult + 0.5
   end
@@ -430,7 +556,8 @@ defmodule RealflightIntegration do
           agl_m: agl,
           airspeed_mps: airspeed,
           rcin: rcin,
-          servo_out: servo_out
+          servo_out: servo_out,
+          exchange_data_watchdog: Watchdog.reset(state.exchange_data_watchdog)
       }
     end
   end
