@@ -8,6 +8,7 @@ defmodule RealflightIntegration do
   use Bitwise
   use GenServer
   require ViaUtils.Comms.Groups, as: Groups
+  require ViaUtils.File
   alias ViaUtils.Watchdog
 
   # @rad2deg 57.295779513
@@ -157,21 +158,19 @@ defmodule RealflightIntegration do
   end
 
   def check_for_rf_ip_address() do
-    realflight_ip_binary = ViaUtils.File.read_file(@ip_filename, "/data/")
+    Logger.debug("RFI checking for rf ip")
+
+    realflight_ip_binary =
+      ViaUtils.File.read_file_target(
+        @ip_filename,
+        ViaUtils.File.default_mount_path(),
+        ViaUtils.File.target?()
+      )
+
+    Logger.debug("RFI ip = #{realflight_ip_binary}")
 
     if !is_nil(realflight_ip_binary) do
       extract_and_send_ip(realflight_ip_binary)
-    else
-      Logger.debug("No Realflight IP found in data. Check USB.")
-      realflight_ip_binary = ViaUtils.File.read_file(@ip_filename)
-
-      if !is_nil(realflight_ip_binary) do
-        ip = extract_and_send_ip(realflight_ip_binary)
-        ViaUtils.File.write_file(@ip_filename, "/data/", ip)
-      else
-        Logger.debug("No Realflight IP found in USB..")
-        nil
-      end
     end
   end
 
