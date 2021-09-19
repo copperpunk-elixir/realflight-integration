@@ -17,6 +17,7 @@ defmodule RealflightIntegration do
   @default_servo [0.5, 0.5, 0, 0.5, 0.5, 0, 0.5, 0, 0.5, 0.5, 0.5, 0.5]
   @rf_stick_mult 1.07
 
+  @start_exchange_data_loop :start_exchange_data_loop
   @exchange_data_loop :exchange_data_loop
   @dt_accel_gyro_loop :dt_accel_gyro_loop
   @gps_pos_vel_loop :gps_pos_vel_loop
@@ -37,15 +38,15 @@ defmodule RealflightIntegration do
     ViaUtils.Comms.start_operator(__MODULE__)
     ViaUtils.Comms.join_group(__MODULE__, @simulation_update_actuators, self())
 
-    ip_address = Keyword.get(config, :host_ip)
+    realflight_ip_address = Keyword.get(config, :realflight_ip)
 
     url =
-      case ip_address do
+      case realflight_ip_address do
         nil -> nil
         ip -> ip <> ":18083"
       end
 
-    Logger.debug("url: #{url}")
+    Logger.debug("config url: #{url}")
 
     publish_dt_accel_gyro_interval_ms = config[:publish_dt_accel_gyro_interval_ms]
     publish_gps_position_velocity_interval_ms = config[:publish_gps_position_velocity_interval_ms]
@@ -54,7 +55,8 @@ defmodule RealflightIntegration do
     publish_downward_tof_distance_interval_ms = config[:publish_downward_tof_distance_interval_ms]
 
     state = %{
-      ip_address: ip_address,
+      realflight_ip_address: realflight_ip_address,
+      host_ip_address: nil,
       url: url,
       bodyaccel_mpss: %{},
       attitude_rad: %{},
@@ -111,24 +113,28 @@ defmodule RealflightIntegration do
 
     ViaUtils.Comms.join_group(__MODULE__, :set_realflight_ip_address)
     ViaUtils.Comms.join_group(__MODULE__, :get_realflight_ip_address)
+    ViaUtils.Comms.join_group(__MODULE__, :host_ip_address_updated)
 
-    state =
-      if is_nil(ip_address) do
-        # ViaUtils.Comms.join_group(__MODULE__, :host_ip_address_updated)
-        check_for_rf_ip_address()
-        state
-      else
-        reset_realflight_interface(ip_address)
+    # state =
+    if is_nil(realflight_ip_address) do
+      # ViaUtils.Comms.join_group(__MODULE__, :host_ip_address_updated)
+      check_for_rf_ip_address()
+    end
 
-        exchange_data_timer =
-          ViaUtils.Process.start_loop(
-            self(),
-            state.exchange_data_loop_interval_ms,
-            @exchange_data_loop
-          )
+    # state
+    # else
 
-        %{state | exchange_data_timer: exchange_data_timer}
-      end
+    #   reset_realflight_interface(ip_address)
+
+    #   exchange_data_timer =
+    #     ViaUtils.Process.start_loop(
+    #       self(),
+    #       state.exchange_data_loop_interval_ms,
+    #       @exchange_data_loop
+    #     )
+
+    #   %{state | exchange_data_timer: exchange_data_timer}
+    # end
 
     {:ok, state}
   end
@@ -139,18 +145,39 @@ defmodule RealflightIntegration do
     state
   end
 
-  def reset_realflight_interface(ip_address) do
-    url = get_url_for_ip(ip_address)
-    restore_controller(url)
-    inject_controller_interface(url)
+  def initialize_exchange_data(state) do
+    Logger.debug("EFI init ex data")
 
-    Logger.info("RFI start loops: #{url}")
+    reset_realflight_interface()
 
     ViaUtils.Comms.send_local_msg_to_group(
       __MODULE__,
-      {:realflight_ip_address_updated, ip_address},
+      {:realflight_ip_address_updated, state.realflight_ip_address},
       self()
     )
+
+    :erlang.send_after(1000, self(), @start_exchange_data_loop)
+    state
+  end
+
+  def reset_realflight_interface() do
+    Logger.debug("reset realflight interface")
+    restore_controller()
+    inject_controller_interface()
+  end
+
+  def restart_exchange_data_timer(exchange_data_timer, interval_ms) do
+    Logger.info("RFI start loops: #{interval_ms}")
+
+    if is_nil(exchange_data_timer) do
+      ViaUtils.Process.start_loop(
+        self(),
+        interval_ms,
+        @exchange_data_loop
+      )
+    else
+      exchange_data_timer
+    end
   end
 
   def get_url_for_ip(ip_address) do
@@ -177,52 +204,65 @@ defmodule RealflightIntegration do
   def extract_and_send_ip(ip_binary) do
     ip = ip_binary |> String.trim_trailing("\n")
 
-    Logger.debug("Realflight IP found in data: #{inspect(ip)}")
+    Logger.debug("RFI Realflight IP found in data: #{inspect(ip)}")
     GenServer.cast(__MODULE__, {:set_realflight_ip_address, ip})
     ip
   end
 
   @impl GenServer
-  def handle_cast(:get_realflight_ip_address, state) do
-    Logger.debug("RF rx get_rf_ip: #{state.ip_address}")
+  def handle_cast({:host_ip_address_updated, host_ip_address}, state) do
+    state =
+      if !is_nil(host_ip_address) and !is_nil(state.realflight_ip_address) do
+        Logger.debug("RFI Host IP Updated")
+        Logger.debug("rfi ip: #{state.realflight_ip_address}")
+        initialize_exchange_data(state)
+      else
+        state
+      end
+
+    {:noreply, %{state | host_ip_address: host_ip_address}}
+  end
+
+  @impl GenServer
+  def handle_cast({:set_realflight_ip_address, realflight_ip_address}, state) do
+    Logger.debug("RFI received RF IP: #{realflight_ip_address}")
+
+    ViaUtils.File.write_file(@ip_filename, "/data/", realflight_ip_address)
 
     ViaUtils.Comms.send_local_msg_to_group(
       __MODULE__,
-      {:realflight_ip_address_updated, state.ip_address},
+      {:realflight_ip_address_updated, realflight_ip_address},
       self()
     )
+
+    url = get_url_for_ip(realflight_ip_address)
+    state = %{state | url: url, realflight_ip_address: realflight_ip_address}
+
+    state =
+      if !is_nil(state.host_ip_address) do
+        Logger.debug("RFI Host IP Updated")
+        Logger.debug("rfi ip: #{state.realflight_ip_address}")
+        Logger.debug("host ip: #{state.host_ip_address}")
+        Process.sleep(1000)
+        initialize_exchange_data(state)
+      else
+        state
+      end
 
     {:noreply, state}
   end
 
   @impl GenServer
-  def handle_cast({:set_realflight_ip_address, ip_address}, state) do
-    Logger.debug("received RF IP: #{ip_address}")
-    reset_realflight_interface(ip_address)
-
-    ViaUtils.File.write_file(@ip_filename, "/data/", ip_address)
+  def handle_cast(:get_realflight_ip_address, state) do
+    Logger.debug("RF rx get_rf_ip: #{state.realflight_ip_address}")
 
     ViaUtils.Comms.send_local_msg_to_group(
       __MODULE__,
-      {:realflight_ip_address_updated, ip_address},
+      {:realflight_ip_address_updated, state.realflight_ip_address},
       self()
     )
 
-    exchange_data_timer =
-      if is_nil(state.exchange_data_timer) do
-        ViaUtils.Process.start_loop(
-          self(),
-          state.exchange_data_loop_interval_ms,
-          @exchange_data_loop
-        )
-      else
-        state.exchange_data_timer
-      end
-
-    url = get_url_for_ip(ip_address)
-
-    {:noreply,
-     %{state | url: url, ip_address: ip_address, exchange_data_timer: exchange_data_timer}}
+    {:noreply, state}
   end
 
   @impl GenServer
@@ -336,6 +376,16 @@ defmodule RealflightIntegration do
   #   # Logger.debug(Common.Utils.eftb_list(cmds, 2))
   #   {:noreply, %{state | servo_out: cmds}}
   # end
+
+  def handle_info(@start_exchange_data_loop, state) do
+    exchange_data_timer =
+      restart_exchange_data_timer(
+        state.exchange_data_timer,
+        state.exchange_data_loop_interval_ms
+      )
+
+    {:noreply, %{state | exchange_data_timer: exchange_data_timer}}
+  end
 
   def handle_info(@exchange_data_loop, state) do
     state = exchange_data(state, state.servo_out)
@@ -472,8 +522,8 @@ defmodule RealflightIntegration do
     <RestoreOriginalControllerDevice><a>1</a><b>2</b></RestoreOriginalControllerDevice>
     </soap:Body>
     </soap:Envelope>"
-    Logger.debug("restore")
-    post_poison(url, body)
+    Logger.debug("restore controller")
+    post_poison(url, body, 1000)
   end
 
   @spec inject_controller_interface(binary()) :: binary()
@@ -484,10 +534,11 @@ defmodule RealflightIntegration do
     <InjectUAVControllerInterface><a>1</a><b>2</b></InjectUAVControllerInterface>
     </soap:Body>
     </soap:Envelope>"
-    post_poison(url, body)
+    Logger.debug("inject controller interface")
+    post_poison(url, body, 1000)
   end
 
-  @spec exchange_data(map(), list()) :: atom()
+  @spec exchange_data(map(), list()) :: map()
   def exchange_data(state, servo_output) do
     # start_time = :os.system_time(:microsecond)
     # Logger.debug("start: #{start_time}")
