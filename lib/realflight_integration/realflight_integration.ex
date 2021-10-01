@@ -7,7 +7,7 @@ defmodule RealflightIntegration.SendReceive do
   require Logger
   use Bitwise
   use GenServer
-  require ViaUtils.Comms.Groups, as: Groups
+  require ViaUtils.Shared.Groups, as: Groups
   require ViaUtils.File
   alias ViaUtils.Watchdog
 
@@ -221,14 +221,10 @@ defmodule RealflightIntegration.SendReceive do
   end
 
   @impl GenServer
-  def handle_cast(:get_realflight_ip_address, state) do
+  def handle_cast({:get_realflight_ip_address, from}, state) do
     Logger.debug("RF rx get_rf_ip: #{state.realflight_ip_address}")
 
-    ViaUtils.Comms.send_local_msg_to_group(
-      __MODULE__,
-      {:realflight_ip_address_updated, state.realflight_ip_address},
-      self()
-    )
+    GenServer.cast(from, {:realflight_ip_address_updated, state.realflight_ip_address})
 
     {:noreply, state}
   end
