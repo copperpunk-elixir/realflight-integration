@@ -24,7 +24,6 @@ defmodule RealflightIntegration.SendReceive do
   @gps_relhdg_loop :gps_relhdg_loop
   @airspeed_loop :airspeed_loop
   @down_tof_loop :down_tof_loop
-  @simulation_update_actuators :simulation_update_actuators
   @clear_exchange_callback :clear_exchange_callback
 
   @url_port 18083
@@ -104,10 +103,10 @@ defmodule RealflightIntegration.SendReceive do
       @down_tof_loop
     )
 
-    ViaUtils.Comms.join_group(__MODULE__, @simulation_update_actuators, self())
-    ViaUtils.Comms.join_group(__MODULE__, :set_realflight_ip_address)
-    ViaUtils.Comms.join_group(__MODULE__, :get_realflight_ip_address)
-    ViaUtils.Comms.join_group(__MODULE__, :host_ip_address_updated)
+    ViaUtils.Comms.join_group(__MODULE__, Groups.simulation_update_actuators(), self())
+    ViaUtils.Comms.join_group(__MODULE__, Groups.set_realflight_ip_address())
+    ViaUtils.Comms.join_group(__MODULE__, Groups.get_realflight_ip_address())
+    ViaUtils.Comms.join_group(__MODULE__, Groups.host_ip_address())
 
     check_and_set_rf_ip_address(realflight_ip_address)
     {:ok, state}
@@ -126,7 +125,7 @@ defmodule RealflightIntegration.SendReceive do
 
     ViaUtils.Comms.send_local_msg_to_group(
       __MODULE__,
-      {:realflight_ip_address_updated, state.realflight_ip_address},
+      {Groups.realflight_ip_address(), state.realflight_ip_address},
       self()
     )
 
@@ -174,11 +173,11 @@ defmodule RealflightIntegration.SendReceive do
       end
 
     Logger.debug("RFI Realflight IP found: #{inspect(realflight_ip)}")
-    GenServer.cast(__MODULE__, {:set_realflight_ip_address, realflight_ip})
+    GenServer.cast(__MODULE__, {Groups.set_realflight_ip_address(), realflight_ip})
   end
 
   @impl GenServer
-  def handle_cast({:host_ip_address_updated, host_ip_address}, state) do
+  def handle_cast({Groups.host_ip_address(), host_ip_address}, state) do
     state =
       if !is_nil(host_ip_address) and !is_nil(state.realflight_ip_address) do
         Logger.debug("RFI Host IP Updated")
@@ -192,14 +191,14 @@ defmodule RealflightIntegration.SendReceive do
   end
 
   @impl GenServer
-  def handle_cast({:set_realflight_ip_address, realflight_ip_address}, state) do
+  def handle_cast({Groups.set_realflight_ip_address(), realflight_ip_address}, state) do
     Logger.debug("RFI received RF IP: #{realflight_ip_address}")
 
     ViaUtils.File.write_file(@ip_filename, "/data/", realflight_ip_address)
 
     ViaUtils.Comms.send_local_msg_to_group(
       __MODULE__,
-      {:realflight_ip_address_updated, realflight_ip_address},
+      {Groups.realflight_ip_address(), realflight_ip_address},
       self()
     )
 
@@ -221,10 +220,10 @@ defmodule RealflightIntegration.SendReceive do
   end
 
   @impl GenServer
-  def handle_cast({:get_realflight_ip_address, from}, state) do
+  def handle_cast({Groups.get_realflight_ip_address(), from}, state) do
     Logger.debug("RF rx get_rf_ip: #{state.realflight_ip_address}")
 
-    GenServer.cast(from, {:realflight_ip_address_updated, state.realflight_ip_address})
+    GenServer.cast(from, {Groups.realflight_ip_address(), state.realflight_ip_address})
 
     {:noreply, state}
   end
@@ -255,7 +254,7 @@ defmodule RealflightIntegration.SendReceive do
   end
 
   @impl GenServer
-  def handle_cast({@simulation_update_actuators, actuators_and_outputs, is_override}, state) do
+  def handle_cast({Groups.simulation_update_actuators(), actuators_and_outputs, is_override}, state) do
     # Logger.debug("output map: #{ViaUtils.Format.eftb_map(actuators_and_outputs,3)}")
     [aileron_prev, elevator_prev, throttle_prev, rudder_prev, _, flaps_prev, _, _, _, _, _, _] =
       state.servo_out
