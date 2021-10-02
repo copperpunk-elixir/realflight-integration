@@ -56,7 +56,7 @@ defmodule RealflightIntegration.SendReceive do
       position_rrm: %{},
       velocity_mps: %{},
       position_origin_rrm:
-        ViaUtils.Location.new_location_input_degrees(@default_latitude, @default_longitude),
+        ViaUtils.Location.new_degrees(@default_latitude, @default_longitude),
       agl_m: nil,
       airspeed_mps: nil,
       rcin: @default_servo,
