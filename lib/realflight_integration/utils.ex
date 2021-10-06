@@ -1,6 +1,7 @@
 defmodule RealflightIntegration.Utils do
   require Logger
   require ViaUtils.Constants, as: VC
+  require ViaUtils.Shared.ValueNames, as: SVN
 
   @spec convert_all_to_float(map(), number()) :: map()
   def convert_all_to_float(string_values, mult \\ 1) do
@@ -48,9 +49,11 @@ defmodule RealflightIntegration.Utils do
 
   @spec extract_attitude(map()) :: map()
   def extract_attitude(aircraft_state) do
-    quat = extract_quat(aircraft_state)
+    %{SVN.quat_w() => w, SVN.quat_x() => x, SVN.quat_y() => y, SVN.quat_z() => z} =
+      extract_quat(aircraft_state)
+
     # Logger.debug("quat: #{inspect(quat)}")
-    ViaUtils.Motion.quaternion_to_euler(quat.w, quat.x, quat.y, -quat.z)
+    ViaUtils.Motion.quaternion_to_euler(w, x, y, -z)
   end
 
   @spec extract_bodyaccel(map()) :: map()
@@ -61,7 +64,7 @@ defmodule RealflightIntegration.Utils do
       "m-accelerationBodyAZ-MPS2"
     ]
 
-    store_keys = [:ax_mpss, :ay_mpss, :az_mpss]
+    store_keys = [SVN.accel_x_mpss(), SVN.accel_y_mpss(), SVN.accel_z_mpss()]
     accel_data = extract_all_or_nothing(aircraft_state, Enum.zip(lookup_keys, store_keys))
 
     if Enum.empty?(accel_data) do
@@ -74,14 +77,15 @@ defmodule RealflightIntegration.Utils do
   @spec extract_bodyrate(map()) :: map()
   def extract_bodyrate(aircraft_state) do
     lookup_keys = ["m-rollRate-DEGpSEC", "m-pitchRate-DEGpSEC", "m-yawRate-DEGpSEC"]
-    store_keys = [:gx_rps, :gy_rps, :gz_rps]
+    store_keys = [SVN.gyro_x_rps(), SVN.gyro_y_rps(), SVN.gyro_z_rps()]
     rate_data = extract_all_or_nothing(aircraft_state, Enum.zip(lookup_keys, store_keys))
 
     if Enum.empty?(rate_data) do
       %{}
     else
       bodyrate = convert_all_to_float(rate_data, VC.deg2rad())
-      Map.replace!(bodyrate, :gz_rps, -bodyrate.gz_rps)
+      %{SVN.gyro_z_rps() => gz} = bodyrate
+      Map.replace!(bodyrate, SVN.gyro_z_rps(), -gz)
     end
   end
 
@@ -107,7 +111,7 @@ defmodule RealflightIntegration.Utils do
       "m-orientationQuaternion-Z"
     ]
 
-    store_keys = [:w, :y, :x, :z]
+    store_keys = [SVN.quat_w(), SVN.quat_x(), SVN.quat_y(), SVN.quat_z()]
     quat_data = extract_all_or_nothing(aircraft_state, Enum.zip(lookup_keys, store_keys))
 
     if Enum.empty?(quat_data) do
@@ -127,10 +131,10 @@ defmodule RealflightIntegration.Utils do
       %{}
     else
       # Logger.debug("#{inspect(pos_data)}")
-      pos = convert_all_to_float(pos_data)
+      %{x: x, y: y, z: z} = convert_all_to_float(pos_data)
 
-      Map.from_struct(ViaUtils.Location.location_from_point_with_dx_dy(origin, pos.x, pos.y))
-      |> Map.put(:altitude_m, pos.z)
+      Map.from_struct(ViaUtils.Location.location_from_point_with_dx_dy(origin, x, y))
+      |> Map.put(SVN.altitude_m(), z)
     end
   end
 
@@ -146,7 +150,7 @@ defmodule RealflightIntegration.Utils do
   @spec extract_roll_inclination_azimuth(map()) :: map()
   def extract_roll_inclination_azimuth(aircraft_state) do
     lookup_keys = ["m-roll-DEG", "m-inclination-DEG", "m-azimuth-DEG"]
-    store_keys = [:roll_rad, :pitch_rad, :yaw_rad]
+    store_keys = [SVN.roll_rad(), SVN.pitch_rad(), SVN.yaw_rad()]
     rate_data = extract_all_or_nothing(aircraft_state, Enum.zip(lookup_keys, store_keys))
 
     if Enum.empty?(rate_data) do
@@ -159,7 +163,7 @@ defmodule RealflightIntegration.Utils do
   @spec extract_velocity(map()) :: map()
   def extract_velocity(aircraft_state) do
     lookup_keys = ["m-velocityWorldU-MPS", "m-velocityWorldV-MPS", "m-velocityWorldW-MPS"]
-    store_keys = [:north_mps, :east_mps, :down_mps]
+    store_keys = [SVN.v_north_mps(), SVN.v_east_mps(), SVN.v_down_mps()]
     vel_data = extract_all_or_nothing(aircraft_state, Enum.zip(lookup_keys, store_keys))
 
     if Enum.empty?(vel_data) do

@@ -8,6 +8,7 @@ defmodule RealflightIntegration.SendReceive do
   use Bitwise
   use GenServer
   require ViaUtils.Shared.Groups, as: Groups
+  require ViaUtils.Shared.ValueNames, as: SVN
   require ViaUtils.File
   alias ViaUtils.Watchdog
 
@@ -55,8 +56,7 @@ defmodule RealflightIntegration.SendReceive do
       bodyrate_rps: %{},
       position_rrm: %{},
       velocity_mps: %{},
-      position_origin_rrm:
-        ViaUtils.Location.new_degrees(@default_latitude, @default_longitude),
+      position_origin_rrm: ViaUtils.Location.new_degrees(@default_latitude, @default_longitude),
       agl_m: nil,
       airspeed_mps: nil,
       rcin: @default_servo,
@@ -254,7 +254,10 @@ defmodule RealflightIntegration.SendReceive do
   end
 
   @impl GenServer
-  def handle_cast({Groups.simulation_update_actuators(), actuators_and_outputs, is_override}, state) do
+  def handle_cast(
+        {Groups.simulation_update_actuators(), actuators_and_outputs, is_override},
+        state
+      ) do
     # Logger.debug("output map: #{ViaUtils.Format.eftb_map(actuators_and_outputs,3)}")
     [aileron_prev, elevator_prev, throttle_prev, rudder_prev, _, flaps_prev, _, _, _, _, _, _] =
       state.servo_out
@@ -368,8 +371,8 @@ defmodule RealflightIntegration.SendReceive do
 
   @impl GenServer
   def handle_info({@dt_accel_gyro_loop, dt_s}, state) do
-    bodyaccel_mpss = state.bodyaccel_mpss
-    bodyrate_rps = state.bodyrate_rps
+    %{bodyaccel_mpss: bodyaccel_mpss, bodyrate_rps: bodyrate_rps, dt_accel_gyro_group: group} =
+      state
 
     unless Enum.empty?(bodyaccel_mpss) or Enum.empty?(bodyrate_rps) do
       # Logger.debug("br: #{ViaUtils.Format.eftb_map_deg(bodyrate_rps, 1)}")
@@ -379,7 +382,7 @@ defmodule RealflightIntegration.SendReceive do
         dt_s,
         bodyaccel_mpss,
         bodyrate_rps,
-        state.dt_accel_gyro_group
+        group
       )
     end
 
@@ -388,15 +391,18 @@ defmodule RealflightIntegration.SendReceive do
 
   @impl GenServer
   def handle_info(@gps_pos_vel_loop, state) do
-    position_rrm = state.position_rrm
-    velocity_mps = state.velocity_mps
+    %{
+      position_rrm: position_rrm,
+      velocity_mps: velocity_mps,
+      gps_itow_positon_velocity_group: group
+    } = state
 
     unless Enum.empty?(position_rrm) or Enum.empty?(velocity_mps) do
       ViaUtils.Simulation.publish_gps_itow_position_velocity(
         __MODULE__,
         position_rrm,
         velocity_mps,
-        state.gps_itow_position_velocity_group
+        group
       )
     end
 
@@ -405,13 +411,14 @@ defmodule RealflightIntegration.SendReceive do
 
   @impl GenServer
   def handle_info(@gps_relhdg_loop, state) do
-    attitude_rad = state.attitude_rad
+    %{attitude_rad: attitude_rad, gps_itow_relheading_group: group} = state
+    %{SVN.yaw_rad() => yaw_rad} = attitude_rad
 
     unless Enum.empty?(attitude_rad) do
       ViaUtils.Simulation.publish_gps_relheading(
         __MODULE__,
-        attitude_rad.yaw_rad,
-        state.gps_itow_relheading_group
+        yaw_rad,
+        group
       )
     end
 
@@ -420,10 +427,10 @@ defmodule RealflightIntegration.SendReceive do
 
   @impl GenServer
   def handle_info(@airspeed_loop, state) do
-    airspeed_mps = state.airspeed_mps
+    %{airspeed_mps: airspeed_mps, airspeed_group: group} = state
 
     unless is_nil(airspeed_mps) do
-      ViaUtils.Simulation.publish_airspeed(__MODULE__, airspeed_mps, state.airspeed_group)
+      ViaUtils.Simulation.publish_airspeed(__MODULE__, airspeed_mps, group)
     end
 
     {:noreply, state}
@@ -431,15 +438,14 @@ defmodule RealflightIntegration.SendReceive do
 
   @impl GenServer
   def handle_info(@down_tof_loop, state) do
-    attitude_rad = state.attitude_rad
-    agl_m = state.agl_m
+    %{attitude_rad: attitude_rad, agl_m: agl_m, downward_tof_distance_group: group} = state
 
     unless Enum.empty?(attitude_rad) or is_nil(agl_m) do
       ViaUtils.Simulation.publish_downward_tof_distance(
         __MODULE__,
         attitude_rad,
         agl_m,
-        state.downward_tof_distance_group
+        group
       )
     end
 
