@@ -394,7 +394,7 @@ defmodule RealflightIntegration.SendReceive do
     %{
       position_rrm: position_rrm,
       velocity_mps: velocity_mps,
-      gps_itow_positon_velocity_group: group
+      gps_itow_position_velocity_group: group
     } = state
 
     unless Enum.empty?(position_rrm) or Enum.empty?(velocity_mps) do
@@ -412,9 +412,10 @@ defmodule RealflightIntegration.SendReceive do
   @impl GenServer
   def handle_info(@gps_relhdg_loop, state) do
     %{attitude_rad: attitude_rad, gps_itow_relheading_group: group} = state
-    %{SVN.yaw_rad() => yaw_rad} = attitude_rad
 
     unless Enum.empty?(attitude_rad) do
+      %{SVN.yaw_rad() => yaw_rad} = attitude_rad
+
       ViaUtils.Simulation.publish_gps_relheading(
         __MODULE__,
         yaw_rad,
