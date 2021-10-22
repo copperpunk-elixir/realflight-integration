@@ -123,7 +123,7 @@ defmodule RealflightIntegration.SendReceive do
 
     reset_realflight_interface()
 
-    ViaUtils.Comms.ca _msg_to_group(
+    ViaUtils.Comms.cast_local_msg_to_group(
       __MODULE__,
       {Groups.realflight_ip_address(), state.realflight_ip_address},
       self()
