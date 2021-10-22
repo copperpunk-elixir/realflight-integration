@@ -123,7 +123,7 @@ defmodule RealflightIntegration.SendReceive do
 
     reset_realflight_interface()
 
-    ViaUtils.Comms.send_local_msg_to_group(
+    ViaUtils.Comms.ca _msg_to_group(
       __MODULE__,
       {Groups.realflight_ip_address(), state.realflight_ip_address},
       self()
@@ -196,7 +196,7 @@ defmodule RealflightIntegration.SendReceive do
 
     ViaUtils.File.write_file(@ip_filename, "/data/", realflight_ip_address)
 
-    ViaUtils.Comms.send_local_msg_to_group(
+    ViaUtils.Comms.cast_local_msg_to_group(
       __MODULE__,
       {Groups.realflight_ip_address(), realflight_ip_address},
       self()
@@ -360,7 +360,7 @@ defmodule RealflightIntegration.SendReceive do
         get_two_sided_value(x)
       end)
 
-    ViaUtils.Comms.send_global_msg_to_group(
+    ViaUtils.Comms.cast_global_msg_to_group(
       __MODULE__,
       {Groups.command_channels(), rcin},
       self()
