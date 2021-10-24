@@ -24,7 +24,7 @@ defmodule RealflightIntegration.SendReceive do
   @gps_pos_vel_loop :gps_pos_vel_loop
   @gps_relhdg_loop :gps_relhdg_loop
   @airspeed_loop :airspeed_loop
-  @down_tof_loop :down_tof_loop
+  @down_range_loop :down_range_loop
   @clear_exchange_callback :clear_exchange_callback
 
   @url_port 18083
@@ -45,7 +45,9 @@ defmodule RealflightIntegration.SendReceive do
     publish_gps_position_velocity_interval_ms = config[:publish_gps_position_velocity_interval_ms]
     publish_gps_relative_heading_interval_ms = config[:publish_gps_relative_heading_interval_ms]
     publish_airspeed_interval_ms = config[:publish_airspeed_interval_ms]
-    publish_downward_tof_distance_interval_ms = config[:publish_downward_tof_distance_interval_ms]
+
+    publish_downward_range_distance_interval_ms =
+      config[:publish_downward_range_distance_interval_ms]
 
     state = %{
       realflight_ip_address: realflight_ip_address,
@@ -68,12 +70,12 @@ defmodule RealflightIntegration.SendReceive do
       gps_itow_position_velocity_group: config[:gps_itow_position_velocity_group],
       gps_itow_relheading_group: config[:gps_itow_relheading_group],
       airspeed_group: config[:airspeed_group],
-      downward_tof_distance_group: config[:downward_tof_distance_group],
+      downward_range_distance_group: config[:downward_range_distance_group],
       publish_dt_accel_gyro_interval_ms: publish_dt_accel_gyro_interval_ms,
       publish_gps_position_velocity_interval_ms: publish_gps_position_velocity_interval_ms,
       publish_gps_relative_heading_interval_ms: publish_gps_relative_heading_interval_ms,
       publish_airspeed_interval_ms: publish_airspeed_interval_ms,
-      publish_downward_tof_distance_interval_ms: publish_downward_tof_distance_interval_ms,
+      publish_downward_range_distance_interval_ms: publish_downward_range_distance_interval_ms,
       exchange_data_loop_interval_ms: config[:sim_loop_interval_ms],
       exchange_data_watchdog: Watchdog.new(@clear_exchange_callback, 10000),
       exchange_data_timer: nil
@@ -99,8 +101,8 @@ defmodule RealflightIntegration.SendReceive do
 
     ViaUtils.Process.start_loop(
       self(),
-      state.publish_downward_tof_distance_interval_ms,
-      @down_tof_loop
+      state.publish_downward_range_distance_interval_ms,
+      @down_range_loop
     )
 
     ViaUtils.Comms.join_group(__MODULE__, Groups.simulation_update_actuators(), self())
@@ -377,7 +379,7 @@ defmodule RealflightIntegration.SendReceive do
     unless Enum.empty?(bodyaccel_mpss) or Enum.empty?(bodyrate_rps) do
       # Logger.debug("br: #{ViaUtils.Format.eftb_map_deg(bodyrate_rps, 1)}")
 
-      ViaUtils.Simulation.publish_dt_accel_gyro(
+      ViaSimulation.Comms.publish_dt_accel_gyro(
         __MODULE__,
         dt_s,
         bodyaccel_mpss,
@@ -398,7 +400,7 @@ defmodule RealflightIntegration.SendReceive do
     } = state
 
     unless Enum.empty?(position_rrm) or Enum.empty?(velocity_mps) do
-      ViaUtils.Simulation.publish_gps_itow_position_velocity(
+      ViaSimulation.Comms.publish_gps_itow_position_velocity(
         __MODULE__,
         position_rrm,
         velocity_mps,
@@ -416,7 +418,7 @@ defmodule RealflightIntegration.SendReceive do
     unless Enum.empty?(attitude_rad) do
       %{SVN.yaw_rad() => yaw_rad} = attitude_rad
 
-      ViaUtils.Simulation.publish_gps_relheading(
+      ViaSimulation.Comms.publish_gps_relheading(
         __MODULE__,
         yaw_rad,
         group
@@ -431,21 +433,23 @@ defmodule RealflightIntegration.SendReceive do
     %{airspeed_mps: airspeed_mps, airspeed_group: group} = state
 
     unless is_nil(airspeed_mps) do
-      ViaUtils.Simulation.publish_airspeed(__MODULE__, airspeed_mps, group)
+      ViaSimulation.Comms.publish_airspeed(__MODULE__, airspeed_mps, group)
     end
 
     {:noreply, state}
   end
 
   @impl GenServer
-  def handle_info(@down_tof_loop, state) do
-    %{attitude_rad: attitude_rad, agl_m: agl_m, downward_tof_distance_group: group} = state
+  def handle_info(@down_range_loop, state) do
+    %{attitude_rad: attitude_rad, agl_m: agl_m, downward_range_distance_group: group} = state
+
+    range_m = ViaUtils.Motion.agl_to_range_measurement(attitude_rad, agl_m)
 
     unless Enum.empty?(attitude_rad) or is_nil(agl_m) do
-      ViaUtils.Simulation.publish_downward_tof_distance(
+      ViaSimulation.Comms.publish_downward_range_distance(
         __MODULE__,
-        attitude_rad,
-        agl_m,
+        range_m,
+        nil,
         group
       )
     end
