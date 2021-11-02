@@ -10,14 +10,15 @@ defmodule RealflightIntegration.SendReceive do
   require ViaUtils.Shared.Groups, as: Groups
   require ViaUtils.Shared.ValueNames, as: SVN
   require ViaUtils.File
+  require ViaUtils.Ubx.ClassDefs, as: ClassDefs
+  require ViaUtils.Ubx.VehicleCmds.ActuatorCmdDirect, as: ActuatorCmdDirect
+  require ViaUtils.Ubx.VehicleCmds.BodyrateActuatorOutput, as: BodyrateActuatorOutput
+  require ViaUtils.Shared.ActuatorNames, as: Act
   alias ViaUtils.Watchdog
 
-  # @rad2deg 57.295779513
   @default_latitude 41.769201
   @default_longitude -122.506394
   @default_servo [0.5, 0.5, 0, 0.5, 0.5, 0, 0.5, 0, 0.5, 0.5, 0.5, 0.5]
-  @rf_stick_mult 1.07
-
   @start_exchange_data_loop :start_exchange_data_loop
   @exchange_data_loop :exchange_data_loop
   @dt_accel_gyro_loop :dt_accel_gyro_loop
@@ -53,6 +54,7 @@ defmodule RealflightIntegration.SendReceive do
       realflight_ip_address: realflight_ip_address,
       host_ip_address: nil,
       url: nil,
+      ubx: UbxInterpreter.new(),
       bodyaccel_mpss: %{},
       attitude_rad: %{},
       bodyrate_rps: %{},
@@ -64,8 +66,9 @@ defmodule RealflightIntegration.SendReceive do
       rcin: @default_servo,
       servo_out: @default_servo,
       rc_passthrough: Keyword.get(config, :rc_passthrough, false),
-      # pwm_channels: Keyword.fetch!(config, :pwm_channels),
-      # reversed_channels: Keyword.fetch!(config, :reversed_channels),
+      channel_names: Keyword.get(config, :channel_names, %{}),
+      downward_range_max_m: Keyword.get(config, :downward_range_max_m, 0),
+      downward_range_module: config[:downward_range_module],
       dt_accel_gyro_group: config[:dt_accel_gyro_group],
       gps_itow_position_velocity_group: config[:gps_itow_position_velocity_group],
       gps_itow_relheading_group: config[:gps_itow_relheading_group],
@@ -105,10 +108,10 @@ defmodule RealflightIntegration.SendReceive do
       @down_range_loop
     )
 
-    ViaUtils.Comms.join_group(__MODULE__, Groups.simulation_update_actuators(), self())
     ViaUtils.Comms.join_group(__MODULE__, Groups.set_realflight_ip_address())
     ViaUtils.Comms.join_group(__MODULE__, Groups.get_realflight_ip_address())
     ViaUtils.Comms.join_group(__MODULE__, Groups.host_ip_address())
+    ViaUtils.Comms.join_group(__MODULE__, Groups.virtual_uart_actuator_output())
 
     check_and_set_rf_ip_address(realflight_ip_address)
     {:ok, state}
@@ -118,64 +121,6 @@ defmodule RealflightIntegration.SendReceive do
   def terminate(reason, state) do
     Logger.error("#{__MODULE__} terminated for #{inspect(reason)}")
     state
-  end
-
-  def initialize_exchange_data(state) do
-    Logger.debug("EFI init ex data")
-
-    reset_realflight_interface()
-
-    ViaUtils.Comms.cast_local_msg_to_group(
-      __MODULE__,
-      {Groups.realflight_ip_address(), state.realflight_ip_address},
-      self()
-    )
-
-    :erlang.send_after(1000, self(), @start_exchange_data_loop)
-    state
-  end
-
-  def reset_realflight_interface() do
-    Logger.debug("reset realflight interface")
-    restore_controller()
-    inject_controller_interface()
-  end
-
-  def restart_exchange_data_timer(exchange_data_timer, interval_ms) do
-    Logger.info("RFI start loops: #{interval_ms}")
-
-    if is_nil(exchange_data_timer) do
-      ViaUtils.Process.start_loop(
-        self(),
-        interval_ms,
-        @exchange_data_loop
-      )
-    else
-      exchange_data_timer
-    end
-  end
-
-  def check_and_set_rf_ip_address(fallback_ip) do
-    Logger.debug("RFI checking for rf ip")
-
-    realflight_ip_binary =
-      ViaUtils.File.read_file_target(
-        @ip_filename,
-        ViaUtils.File.default_mount_path(),
-        ViaUtils.File.target?()
-      )
-
-    Logger.debug("RFI ip = #{realflight_ip_binary}")
-
-    realflight_ip =
-      cond do
-        !is_nil(realflight_ip_binary) -> realflight_ip_binary |> String.trim_trailing("\n")
-        !is_nil(fallback_ip) -> fallback_ip
-        true -> raise "No valid Realflight IP address available"
-      end
-
-    Logger.debug("RFI Realflight IP found: #{inspect(realflight_ip)}")
-    GenServer.cast(__MODULE__, {Groups.set_realflight_ip_address(), realflight_ip})
   end
 
   @impl GenServer
@@ -255,94 +200,121 @@ defmodule RealflightIntegration.SendReceive do
     {:noreply, state}
   end
 
-  @impl GenServer
-  def handle_cast(
-        {Groups.simulation_update_actuators(), actuators_and_outputs, is_override},
-        state
-      ) do
-    # Logger.debug("output map: #{ViaUtils.Format.eftb_map(actuators_and_outputs,3)}")
-    [aileron_prev, elevator_prev, throttle_prev, rudder_prev, _, flaps_prev, _, _, _, _, _, _] =
-      state.servo_out
+  @spec check_for_new_messages_and_process(list(), map()) :: map()
+  def check_for_new_messages_and_process(data, state) do
+    %{
+      ubx: ubx,
+      servo_out: servo_out_prev
+    } = state
 
-    aileron =
-      case Map.get(actuators_and_outputs, :aileron_scaled) do
-        nil ->
-          Logger.error("RFI aileron is nil")
-          aileron_prev
+    {ubx, payload} = UbxInterpreter.check_for_new_message(ubx, data)
 
-        aileron_two_sided ->
-          get_one_sided_value(aileron_two_sided)
-      end
+    if Enum.empty?(payload) do
+      state
+    else
+      [aileron_prev, elevator_prev, throttle_prev, rudder_prev, _, flaps_prev, _, _, _, _, _, _] =
+        servo_out_prev
 
-    elevator =
-      case Map.get(actuators_and_outputs, :elevator_scaled) do
-        nil ->
-          Logger.error("RFI elevator is nil")
-          elevator_prev
+      %{msg_class: msg_class, msg_id: msg_id} = ubx
+      Logger.debug("msg class/id: #{msg_class}/#{msg_id}")
 
-        elevator_two_sided ->
-          get_one_sided_value(elevator_two_sided)
-      end
+      state =
+        case msg_class do
+          ClassDefs.vehicle_cmds() ->
+            case msg_id do
+              BodyrateActuatorOutput.id() ->
+                cmds =
+                  UbxInterpreter.deconstruct_message_to_map(
+                    BodyrateActuatorOutput.bytes(),
+                    BodyrateActuatorOutput.multipliers(),
+                    BodyrateActuatorOutput.keys(),
+                    payload
+                  )
+                  |> Enum.reduce(%{}, fn {ch_name, value}, acc ->
+                    one_sided_value = ViaUtils.Math.get_one_sided_from_two_sided(value)
+                    Map.put(acc, ch_name, one_sided_value)
+                  end)
 
-    elevator = if is_override, do: elevator, else: 1 - elevator
+                %{
+                  Act.aileron() => aileron_scaled,
+                  Act.elevator() => elevator_scaled,
+                  Act.throttle() => throttle_scaled,
+                  Act.rudder() => rudder_scaled
+                } = cmds
 
-    throttle =
-      case Map.get(actuators_and_outputs, :throttle_scaled) do
-        nil ->
-          Logger.error("RFI throttle is nil")
-          throttle_prev
+                servo_out = [
+                  aileron_scaled,
+                  1-elevator_scaled,
+                  throttle_scaled,
+                  rudder_scaled,
+                  0,
+                  flaps_prev,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0
+                ]
 
-        throttle ->
-          throttle
-      end
+                Logger.debug("servo out: #{ViaUtils.Format.eftb_list(servo_out, 3)}")
+                %{state | servo_out: servo_out}
 
-    rudder =
-      case Map.get(actuators_and_outputs, :rudder_scaled) do
-        nil ->
-          Logger.error("RFI rudder is nil")
-          rudder_prev
+              ActuatorCmdDirect.id() ->
+                cmds =
+                  ActuatorCmdDirect.Utils.get_actuator_output(payload, state.channel_names)
+                  |> Enum.reduce(%{}, fn {ch_name, value}, acc ->
+                    one_sided_value = ViaUtils.Math.get_one_sided_from_two_sided(value)
+                    Map.put(acc, ch_name, one_sided_value)
+                  end)
 
-        rudder_two_sided ->
-          get_one_sided_value(rudder_two_sided)
-      end
+                # Logger.debug("direct act: #{inspect(cmds)}")
 
-    flaps =
-      case Map.get(actuators_and_outputs, :flaps_scaled) do
-        nil ->
-          Logger.error("RFI flaps is nil")
-          flaps_prev
+                aileron_scaled = Map.get(cmds, Act.aileron(), aileron_prev)
+                elevator_scaled = Map.get(cmds, Act.elevator(), elevator_prev)
+                rudder_scaled = Map.get(cmds, Act.rudder(), rudder_prev)
+                throttle_scaled = Map.get(cmds, Act.throttle(), throttle_prev)
+                flaps_scaled = Map.get(cmds, Act.flaps(), flaps_prev)
 
-        flaps ->
-          flaps
-      end
+                servo_out = [
+                  aileron_scaled,
+                  elevator_scaled,
+                  throttle_scaled,
+                  rudder_scaled,
+                  0,
+                  flaps_scaled,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0
+                ]
 
-    servo_out = [aileron, elevator, throttle, rudder, 0, flaps, 0, 0, 0, 0, 0, 0]
+                Logger.debug("servo out: #{ViaUtils.Format.eftb_list(servo_out, 3)}")
+                %{state | servo_out: servo_out}
 
-    # Logger.debug("servo_out: #{inspect(servo_out)}")
-    {:noreply, %{state | servo_out: servo_out}}
+              _other ->
+                Logger.warn("Bad message id: #{msg_id}")
+                state
+            end
+
+          _other ->
+            Logger.warn("Bad message class: #{msg_class}")
+            state
+        end
+
+      check_for_new_messages_and_process([], %{state | ubx: UbxInterpreter.clear(ubx)})
+    end
   end
 
-  # @impl GenServer
-  # def handle_cast({:pwm_input, scaled_values}, state) do
-  #   # Logger.debug("pwm ch: #{inspect(pwm_channels)}")
-  #   # Logger.info("scaled: #{Common.Utils.eftb_list(scaled_values, 3)}")
-  #   cmds_reverse =
-  #     Enum.reduce(Enum.with_index(scaled_values), [], fn {ch_value, _index}, acc ->
-  #       [ch_value] ++ acc
-  #     end)
-
-  #   cmds_reverse =
-  #     Enum.reduce(1..(11 - length(scaled_values)), cmds_reverse, fn _x, acc ->
-  #       [0] ++ acc
-  #     end)
-
-  #   cmds =
-  #     Enum.reverse(cmds_reverse)
-  #     |> List.insert_at(4, 0)
-
-  #   # Logger.debug(Common.Utils.eftb_list(cmds, 2))
-  #   {:noreply, %{state | servo_out: cmds}}
-  # end
+  @impl GenServer
+  def handle_info({:circuits_uart, _port, data}, state) do
+    Logger.debug("rfi rx: #{data}")
+    state = check_for_new_messages_and_process(:binary.bin_to_list(data), state)
+    Logger.debug("state servo out: #{ViaUtils.Format.eftb_list(state.servo_out, 3)}")
+    {:noreply, state}
+  end
 
   def handle_info(@start_exchange_data_loop, state) do
     exchange_data_timer =
@@ -359,7 +331,7 @@ defmodule RealflightIntegration.SendReceive do
 
     rcin =
       Enum.map(state.rcin, fn x ->
-        get_two_sided_value(x)
+        ViaUtils.Math.get_two_sided_from_one_sided(x)
       end)
 
     ViaUtils.Comms.cast_global_msg_to_group(
@@ -441,17 +413,25 @@ defmodule RealflightIntegration.SendReceive do
 
   @impl GenServer
   def handle_info(@down_range_loop, state) do
-    %{attitude_rad: attitude_rad, agl_m: agl_m, downward_range_distance_group: group} = state
-
-    range_m = ViaUtils.Motion.agl_to_range_measurement(attitude_rad, agl_m)
+    %{
+      attitude_rad: attitude_rad,
+      agl_m: agl_m,
+      downward_range_distance_group: group,
+      downward_range_max_m: downward_range_max_m,
+      downward_range_module: downward_range_module
+    } = state
 
     unless Enum.empty?(attitude_rad) or is_nil(agl_m) do
-      ViaSimulation.Comms.publish_downward_range_distance(
-        __MODULE__,
-        range_m,
-        nil,
-        group
-      )
+      range_m = ViaUtils.Motion.agl_to_range_measurement(attitude_rad, agl_m)
+
+      if range_m < downward_range_max_m do
+        ViaSimulation.Comms.publish_downward_range_distance(
+          __MODULE__,
+          range_m,
+          downward_range_module,
+          group
+        )
+      end
     end
 
     {:noreply, state}
@@ -467,8 +447,62 @@ defmodule RealflightIntegration.SendReceive do
     {:noreply, %{state | exchange_data_watchdog: Watchdog.reset(state.exchange_data_watchdog)}}
   end
 
-  def fix_rx(x) do
-    (x - 0.5) * @rf_stick_mult + 0.5
+  def initialize_exchange_data(state) do
+    Logger.debug("EFI init ex data")
+
+    reset_realflight_interface()
+
+    ViaUtils.Comms.cast_local_msg_to_group(
+      __MODULE__,
+      {Groups.realflight_ip_address(), state.realflight_ip_address},
+      self()
+    )
+
+    :erlang.send_after(1000, self(), @start_exchange_data_loop)
+    state
+  end
+
+  def reset_realflight_interface() do
+    Logger.debug("reset realflight interface")
+    restore_controller()
+    inject_controller_interface()
+  end
+
+  def restart_exchange_data_timer(exchange_data_timer, interval_ms) do
+    Logger.info("RFI start loops: #{interval_ms}")
+
+    if is_nil(exchange_data_timer) do
+      ViaUtils.Process.start_loop(
+        self(),
+        interval_ms,
+        @exchange_data_loop
+      )
+    else
+      exchange_data_timer
+    end
+  end
+
+  def check_and_set_rf_ip_address(fallback_ip) do
+    Logger.debug("RFI checking for rf ip")
+
+    realflight_ip_binary =
+      ViaUtils.File.read_file_target(
+        @ip_filename,
+        ViaUtils.File.default_mount_path(),
+        ViaUtils.File.target?()
+      )
+
+    Logger.debug("RFI ip = #{realflight_ip_binary}")
+
+    realflight_ip =
+      cond do
+        !is_nil(realflight_ip_binary) -> realflight_ip_binary |> String.trim_trailing("\n")
+        !is_nil(fallback_ip) -> fallback_ip
+        true -> raise "No valid Realflight IP address available"
+      end
+
+    Logger.debug("RFI Realflight IP found: #{inspect(realflight_ip)}")
+    GenServer.cast(__MODULE__, {Groups.set_realflight_ip_address(), realflight_ip})
   end
 
   @spec reset_aircraft(binary()) :: binary()
@@ -513,6 +547,14 @@ defmodule RealflightIntegration.SendReceive do
 
   @spec exchange_data(map(), list()) :: map()
   def exchange_data(state, servo_output) do
+    %{
+      url: url,
+      position_origin_rrm: position_origin,
+      servo_out: servo_out_prev,
+      rc_passthrough: rc_passthrough,
+      exchange_data_watchdog: exchange_data_watchdog
+    } = state
+
     # start_time = :os.system_time(:microsecond)
     # Logger.debug("start: #{start_time}")
     body_header = "<?xml version='1.0' encoding='UTF-8'?>
@@ -535,7 +577,7 @@ defmodule RealflightIntegration.SendReceive do
 
     body = body_header <> servo_str <> body_footer
     # Logger.debug("body: #{inspect(body)}")
-    response = post_poison(state.url, body)
+    response = post_poison(url, body)
 
     xml_map =
       case SAXMap.from_string(response) do
@@ -550,7 +592,7 @@ defmodule RealflightIntegration.SendReceive do
     else
       aircraft_state = Utils.extract_from_path(return_data, aircraft_state_path())
       rcin_values = Utils.extract_from_path(return_data, rcin_path())
-      position = Utils.extract_position(aircraft_state, state.position_origin_rrm)
+      position = Utils.extract_position(aircraft_state, position_origin)
       velocity = Utils.extract_velocity(aircraft_state)
       attitude = Utils.extract_attitude(aircraft_state)
       bodyaccel = Utils.extract_bodyaccel(aircraft_state)
@@ -558,7 +600,7 @@ defmodule RealflightIntegration.SendReceive do
       agl = Utils.extract_agl(aircraft_state)
       airspeed = Utils.extract_airspeed(aircraft_state)
       rcin = Utils.extract_rcin(rcin_values)
-      servo_out = if state.rc_passthrough, do: rcin, else: state.servo_out
+      servo_out = if rc_passthrough, do: rcin, else: servo_out_prev
 
       # Logger.debug("rcin: #{inspect(rcin)}")
       # Logger.debug("position: #{ViaUtils.Location.to_string(position)}")
@@ -582,7 +624,7 @@ defmodule RealflightIntegration.SendReceive do
           airspeed_mps: airspeed,
           rcin: rcin,
           servo_out: servo_out,
-          exchange_data_watchdog: Watchdog.reset(state.exchange_data_watchdog)
+          exchange_data_watchdog: Watchdog.reset(exchange_data_watchdog)
       }
     end
   end
@@ -638,15 +680,5 @@ defmodule RealflightIntegration.SendReceive do
   @spec rcin_path() :: list()
   def rcin_path() do
     ["m-previousInputsState", "m-channelValues-0to1", "item"]
-  end
-
-  @spec get_one_sided_value(number()) :: number()
-  def get_one_sided_value(two_sided_value) do
-    0.5 * two_sided_value + 0.5
-  end
-
-  @spec get_two_sided_value(number()) :: number()
-  def get_two_sided_value(one_sided_value) do
-    2 * one_sided_value - 1
   end
 end
