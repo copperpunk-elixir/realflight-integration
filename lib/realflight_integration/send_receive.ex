@@ -216,7 +216,7 @@ defmodule RealflightIntegration.SendReceive do
         servo_out_prev
 
       %{msg_class: msg_class, msg_id: msg_id} = ubx
-      Logger.debug("msg class/id: #{msg_class}/#{msg_id}")
+      # Logger.debug("msg class/id: #{msg_class}/#{msg_id}")
 
       state =
         case msg_class do
@@ -244,7 +244,7 @@ defmodule RealflightIntegration.SendReceive do
 
                 servo_out = [
                   aileron_scaled,
-                  1-elevator_scaled,
+                  1 - elevator_scaled,
                   throttle_scaled,
                   rudder_scaled,
                   0,
@@ -257,7 +257,7 @@ defmodule RealflightIntegration.SendReceive do
                   0
                 ]
 
-                Logger.debug("servo out: #{ViaUtils.Format.eftb_list(servo_out, 3)}")
+                # Logger.debug("servo out: #{ViaUtils.Format.eftb_list(servo_out, 3)}")
                 %{state | servo_out: servo_out}
 
               ActuatorCmdDirect.id() ->
@@ -291,7 +291,7 @@ defmodule RealflightIntegration.SendReceive do
                   0
                 ]
 
-                Logger.debug("servo out: #{ViaUtils.Format.eftb_list(servo_out, 3)}")
+                # Logger.debug("servo out: #{ViaUtils.Format.eftb_list(servo_out, 3)}")
                 %{state | servo_out: servo_out}
 
               _other ->
@@ -310,9 +310,9 @@ defmodule RealflightIntegration.SendReceive do
 
   @impl GenServer
   def handle_info({:circuits_uart, _port, data}, state) do
-    Logger.debug("rfi rx: #{data}")
+    # Logger.debug("rfi rx: #{data}")
     state = check_for_new_messages_and_process(:binary.bin_to_list(data), state)
-    Logger.debug("state servo out: #{ViaUtils.Format.eftb_list(state.servo_out, 3)}")
+    # Logger.debug("state servo out: #{ViaUtils.Format.eftb_list(state.servo_out, 3)}")
     {:noreply, state}
   end
 
@@ -422,7 +422,8 @@ defmodule RealflightIntegration.SendReceive do
     } = state
 
     unless Enum.empty?(attitude_rad) or is_nil(agl_m) do
-      range_m = ViaUtils.Motion.agl_to_range_measurement(attitude_rad, agl_m)
+      range_m =
+        ViaUtils.Motion.agl_to_range_measurement(attitude_rad, agl_m, downward_range_max_m)
 
       if range_m < downward_range_max_m do
         ViaSimulation.Comms.publish_downward_range_distance(
