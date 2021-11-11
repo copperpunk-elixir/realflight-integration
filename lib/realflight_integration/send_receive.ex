@@ -10,10 +10,10 @@ defmodule RealflightIntegration.SendReceive do
   require ViaUtils.Shared.Groups, as: Groups
   require ViaUtils.Shared.ValueNames, as: SVN
   require ViaUtils.File
-  require ViaUtils.Ubx.ClassDefs, as: ClassDefs
-  require ViaUtils.Ubx.VehicleCmds.ActuatorCmdDirect, as: ActuatorCmdDirect
-  require ViaUtils.Ubx.VehicleCmds.BodyrateActuatorOutput, as: BodyrateActuatorOutput
-  require ViaUtils.Shared.ActuatorNames, as: Act
+  require ViaTelemetry.Ubx.Custom.ClassDefs, as: ClassDefs
+  require ViaTelemetry.Ubx.Custom.VehicleCmds.ActuatorCmdDirect, as: ActuatorCmdDirect
+  require ViaTelemetry.Ubx.Custom.VehicleCmds.ControllerActuatorOutput, as: ControllerActuatorOutput
+  require ViaUtils.Shared.GoalNames, as: SGN
   alias ViaUtils.Watchdog
 
   @default_latitude 41.769201
@@ -216,18 +216,18 @@ defmodule RealflightIntegration.SendReceive do
         servo_out_prev
 
       %{msg_class: msg_class, msg_id: msg_id} = ubx
-      # Logger.debug("msg class/id: #{msg_class}/#{msg_id}")
+      # Logger.debug("#{__MODULE__} msg class/id: #{msg_class}/#{msg_id}")
 
       state =
         case msg_class do
           ClassDefs.vehicle_cmds() ->
             case msg_id do
-              BodyrateActuatorOutput.id() ->
+              ControllerActuatorOutput.id() ->
                 cmds =
                   UbxInterpreter.deconstruct_message_to_map(
-                    BodyrateActuatorOutput.bytes(),
-                    BodyrateActuatorOutput.multipliers(),
-                    BodyrateActuatorOutput.keys(),
+                    ControllerActuatorOutput.bytes(),
+                    ControllerActuatorOutput.multipliers(),
+                    ControllerActuatorOutput.keys(),
                     payload
                   )
                   |> Enum.reduce(%{}, fn {ch_name, value}, acc ->
@@ -236,10 +236,10 @@ defmodule RealflightIntegration.SendReceive do
                   end)
 
                 %{
-                  Act.aileron() => aileron_scaled,
-                  Act.elevator() => elevator_scaled,
-                  Act.throttle() => throttle_scaled,
-                  Act.rudder() => rudder_scaled
+                  SGN.aileron_scaled() => aileron_scaled,
+                  SGN.elevator_scaled() => elevator_scaled,
+                  SGN.throttle_scaled() => throttle_scaled,
+                  SGN.rudder_scaled() => rudder_scaled
                 } = cmds
 
                 servo_out = [
@@ -262,7 +262,7 @@ defmodule RealflightIntegration.SendReceive do
 
               ActuatorCmdDirect.id() ->
                 cmds =
-                  ActuatorCmdDirect.Utils.get_actuator_output(payload, state.channel_names)
+                  ActuatorCmdDirect.get_output_values(payload, state.channel_names)
                   |> Enum.reduce(%{}, fn {ch_name, value}, acc ->
                     one_sided_value = ViaUtils.Math.get_one_sided_from_two_sided(value)
                     Map.put(acc, ch_name, one_sided_value)
@@ -270,11 +270,11 @@ defmodule RealflightIntegration.SendReceive do
 
                 # Logger.debug("direct act: #{inspect(cmds)}")
 
-                aileron_scaled = Map.get(cmds, Act.aileron(), aileron_prev)
-                elevator_scaled = Map.get(cmds, Act.elevator(), elevator_prev)
-                rudder_scaled = Map.get(cmds, Act.rudder(), rudder_prev)
-                throttle_scaled = Map.get(cmds, Act.throttle(), throttle_prev)
-                flaps_scaled = Map.get(cmds, Act.flaps(), flaps_prev)
+                aileron_scaled = Map.get(cmds, SGN.aileron_scaled(), aileron_prev)
+                elevator_scaled = Map.get(cmds, SGN.elevator_scaled(), elevator_prev)
+                rudder_scaled = Map.get(cmds, SGN.rudder_scaled(), rudder_prev)
+                throttle_scaled = Map.get(cmds, SGN.throttle_scaled(), throttle_prev)
+                flaps_scaled = Map.get(cmds, SGN.flaps_scaled(), flaps_prev)
 
                 servo_out = [
                   aileron_scaled,

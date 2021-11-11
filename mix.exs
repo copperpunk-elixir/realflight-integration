@@ -49,8 +49,11 @@ defmodule RealflightIntegration.MixProject do
   defp deps do
     [
       {:ex_doc, "~> 0.24", only: :dev, runtime: false},
-      {:via_utils, path: "/home/ubuntu/Documents/Github/cp-elixir/libraries/via-utils", override: true},# "~> 0.2.0"},
+      # "~> 0.2.0"},
+      {:via_utils,
+       path: "/home/ubuntu/Documents/Github/cp-elixir/libraries/via-utils", override: true},
       {:via_simulation, path: "/home/ubuntu/Documents/Github/cp-elixir/libraries/via-simulation"},
+      {:via_telemetry, path: "/home/ubuntu/Documents/Github/cp-elixir/libraries/via-telemetry"},
       #  git: "https://github.com/copperpunk-elixir/via-utils.git", tag: "v0.1.4-alpha"},
       {:soap, "~> 1.0.1"},
       {:httpoison, "~> 1.8.0"},
